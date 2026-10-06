@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure MongoDB Todo App</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f9;
+            padding: 40px;
+            text-align: center;
+        }
+
+        .container {
+            max-width: 450px;
+            margin: 0 auto;
+            background: white;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+
+        input {
+            width: 80%;
+            padding: 10px;
+            margin: 8px 0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        button.success {
+            background-color: #28a745;
+        }
+
+        button.danger {
+            background-color: #dc3545;
+        }
+
+        ul {
+            list-style: none;
+            padding: 0;
+            text-align: left;
+        }
+
+        li {
+            padding: 12px;
+            background: #eee;
+            margin-top: 6px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-radius: 4px;
+        }
+
+        .completed {
+            text-decoration: line-through;
+            color: gray;
+            background: #d4edda;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .logout-btn {
+            background-color: #6c757d;
+            font-size: 12px;
+            padding: 5px 10px;
+            float: right;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <!-- 1. AUTH SECTION (SIGNUP / LOGIN) -->
+        <div id="authBox">
+            <h2 id="authTitle">Login</h2>
+            <input type="text" id="usernameInput" placeholder="Username dalein...">
+            <input type="password" id="passwordInput" placeholder="Password dalein...">
+            <br>
+            <button id="mainAuthBtn" onclick="handleAuth()">Login</button>
+            <p style="font-size: 14px; cursor: pointer; color: #007bff;" onclick="toggleAuthMode()" id="toggleText">Naya
+                account banayein (Signup)</p>
+        </div>
+
+        <!-- 2. TODO SECTION (PROTECTED) -->
+        <div id="todoBox" class="hidden">
+            <button class="logout-btn" onclick="logout()">Logout</button>
+            <h2>Welcome <span id="userGreeting" style="color:#007bff;"></span>! 👋</h2>
+            <h3>Your Secure Todo List</h3>
+            <input type="text" id="taskInput" placeholder="Naya task likho...">
+            <button class="success" onclick="addTask()">Add Task</button>
+            <ul id="todoList"></ul>
+        </div>
+    </div>
+
+    <script>
+        const BASE_URL = 'http://localhost:3000/api';
+        let isLoginMode = true;
+        let token = localStorage.getItem('token') || '';
+        let loggedInUser = localStorage.getItem('username') || '';
+
+        // Switch between Login and Signup UI
+        function toggleAuthMode() {
+            isLoginMode = !isLoginMode;
+            document.getElementById('authTitle').innerText = isLoginMode ? 'Login' : 'Signup (Naya Account)';
+            document.getElementById('mainAuthBtn').innerText = isLoginMode ? 'Login' : 'Register / Signup';
+            document.getElementById('toggleText').innerText = isLoginMode ? 'Naya account banayein (Signup)' : 'Pehle se account hai? Login karein';
+        }
+
+        // Handle Login or Signup submission
+        async function handleAuth() {
+            const username = document.getElementById('usernameInput').value;
+            const password = document.getElementById('passwordInput').value;
+            if (!username || !password) return alert("Dono fields bharna zaroori hai!");
+
+            const endpoint = isLoginMode ? '/auth/login' : '/auth/signup';
+
+            try {
+                const res = await fetch(`${BASE_URL}${endpoint}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+
+                if (!res.ok) throw new Error(data.message);
+
+                if (isLoginMode) {
+                    token = data.token;
+                    loggedInUser = username;
+                    localStorage.setItem('token', token); // Token ko browser memory mein save kiya
+                    localStorage.setItem('username', loggedInUser);
+                    checkScreenState();
+                } else {
+                    alert(data.message);
+                    toggleAuthMode(); // Signup ke baad login screen par bhejein
+                }
+            } catch (err) {
+                alert(err.message);
+            }
+        }
+
+        // Fetch and show Protected Todos (GET)
+        async function fetchTodos() {
+            try {
+                const res = await fetch(`${BASE_URL}/todos`, {
+                    headers: { 'Authorization': `Bearer ${token}` } // Security Guard ko token dikhaya
+                });
+                if (res.status === 401) return logout();
+                const todos = await res.json();
+
+                const list = document.getElementById('todoList');
+                list.innerHTML = '';
+                todos.forEach(todo => {
+                    const li = document.createElement('li');
+                    li.className = todo.isCompleted ? 'completed' : '';
+                    li.innerHTML = `
+                    <span onclick="toggleComplete('${todo._id}', ${todo.isCompleted})" style="cursor:pointer;">${todo.task}</span>
+                    <button class="danger" style="padding:4px 8px; font-size:12px;" onclick="deleteTodo('${todo._id}')">Delete</button>
+                `;
+                    list.appendChild(li);
+                });
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        // Add Secure Todo (POST)
+        async function addTask() {
+            const input = document.getElementById('taskInput');
+            if (!input.value) return;
+
+            await fetch(`${BASE_URL}/todos`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ task: input.value })
+            });
+            input.value = '';
+            fetchTodos();
+        }
+
+        // Toggle Task Status (PUT)
+        async function toggleComplete(id, currentStatus) {
+            await fetch(`${BASE_URL}/todos/${id}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ isCompleted: !currentStatus })
+            });
+            fetchTodos();
+        }
+
+        // Delete Task (DELETE)
+        async function deleteTodo(id) {
+            await fetch(`${BASE_URL}/todos/${id}`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            fetchTodos();
+        }
+
+        // Check screen dynamic state (Hide/Show sections)
+        function checkScreenState() {
+            if (token) {
+                document.getElementById('authBox').classList.add('hidden');
+                document.getElementById('todoBox').classList.remove('hidden');
+                document.getElementById('userGreeting').innerText = loggedInUser;
+                fetchTodos();
+            } else {
+                document.getElementById('authBox').classList.remove('hidden');
+                document.getElementById('todoBox').classList.add('hidden');
+            }
+        }
+
+        // Logout function
+        function logout() {
+            token = '';
+            loggedInUser = '';
+            localStorage.clear();
+            checkScreenState();
+        }
+
+        // Page start control
+        checkScreenState();
+    </script>
+</body>
+
+</html>
