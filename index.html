@@ -80,13 +80,34 @@
             padding: 5px 10px;
             float: right;
         }
+
+        /* Filter tabs ke liye style */
+        .filter-container {
+            margin: 15px 0;
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .filter-btn {
+            background-color: #e0e0e0;
+            color: #333;
+            padding: 6px 12px;
+            font-size: 14px;
+        }
+
+        .filter-btn.active {
+            background-color: #007bff;
+            color: white;
+            font-weight: bold;
+        }
     </style>
 </head>
 
 <body>
 
     <div class="container">
-        <!-- 1. AUTH SECTION (SIGNUP / LOGIN) -->
+        <!-- 1. AUTH SECTION -->
         <div id="authBox">
             <h2 id="authTitle">Login</h2>
             <input type="text" id="usernameInput" placeholder="Username dalein...">
@@ -97,13 +118,21 @@
                 account banayein (Signup)</p>
         </div>
 
-        <!-- 2. TODO SECTION (PROTECTED) -->
+        <!-- 2. TODO SECTION -->
         <div id="todoBox" class="hidden">
             <button class="logout-btn" onclick="logout()">Logout</button>
             <h2>Welcome <span id="userGreeting" style="color:#007bff;"></span>! 👋</h2>
             <h3>Your Secure Todo List</h3>
             <input type="text" id="taskInput" placeholder="Naya task likho...">
             <button class="success" onclick="addTask()">Add Task</button>
+
+            <!-- NAYE FILTER BUTTONS -->
+            <div class="filter-container">
+                <button class="filter-btn active" id="btn-all" onclick="changeFilter('all')">All</button>
+                <button class="filter-btn" id="btn-active" onclick="changeFilter('active')">Active</button>
+                <button class="filter-btn" id="btn-completed" onclick="changeFilter('completed')">Completed</button>
+            </div>
+
             <ul id="todoList"></ul>
         </div>
     </div>
@@ -114,7 +143,9 @@
         let token = localStorage.getItem('token') || '';
         let loggedInUser = localStorage.getItem('username') || '';
 
-        // Switch between Login and Signup UI
+        // Naya Variable: Default filter state rakhne ke liye
+        let currentFilter = 'all';
+
         function toggleAuthMode() {
             isLoginMode = !isLoginMode;
             document.getElementById('authTitle').innerText = isLoginMode ? 'Login' : 'Signup (Naya Account)';
@@ -122,7 +153,6 @@
             document.getElementById('toggleText').innerText = isLoginMode ? 'Naya account banayein (Signup)' : 'Pehle se account hai? Login karein';
         }
 
-        // Handle Login or Signup submission
         async function handleAuth() {
             const username = document.getElementById('usernameInput').value;
             const password = document.getElementById('passwordInput').value;
@@ -137,36 +167,40 @@
                     body: JSON.stringify({ username, password })
                 });
                 const data = await res.json();
-
                 if (!res.ok) throw new Error(data.message);
 
                 if (isLoginMode) {
                     token = data.token;
                     loggedInUser = username;
-                    localStorage.setItem('token', token); // Token ko browser memory mein save kiya
+                    localStorage.setItem('token', token);
                     localStorage.setItem('username', loggedInUser);
                     checkScreenState();
                 } else {
                     alert(data.message);
-                    toggleAuthMode(); // Signup ke baad login screen par bhejein
+                    toggleAuthMode();
                 }
             } catch (err) {
                 alert(err.message);
             }
         }
 
-        // Fetch and show Protected Todos (GET)
+        // UPDATED: Todos lekar filter ke hisab se screen par dikhana
         async function fetchTodos() {
             try {
                 const res = await fetch(`${BASE_URL}/todos`, {
-                    headers: { 'Authorization': `Bearer ${token}` } // Security Guard ko token dikhaya
+                    headers: { 'Authorization': `Bearer ${token}` }
                 });
                 if (res.status === 401) return logout();
                 const todos = await res.json();
 
                 const list = document.getElementById('todoList');
                 list.innerHTML = '';
+
                 todos.forEach(todo => {
+                    // Filter Condition Lagayi
+                    if (currentFilter === 'active' && todo.isCompleted) return;
+                    if (currentFilter === 'completed' && !todo.isCompleted) return;
+
                     const li = document.createElement('li');
                     li.className = todo.isCompleted ? 'completed' : '';
                     li.innerHTML = `
@@ -180,7 +214,20 @@
             }
         }
 
-        // Add Secure Todo (POST)
+        // NAYA FUNCTION: Filter badalne aur buttons ko highlight karne ke liye
+        function changeFilter(filterType) {
+            currentFilter = filterType;
+
+            // Saare buttons se active class hatayein
+            document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
+
+            // Clicked button par active class jodein
+            document.getElementById(`btn-${filterType}`).classList.add('active');
+
+            // List ko dobara fetch/render karein
+            fetchTodos();
+        }
+
         async function addTask() {
             const input = document.getElementById('taskInput');
             if (!input.value) return;
@@ -197,7 +244,6 @@
             fetchTodos();
         }
 
-        // Toggle Task Status (PUT)
         async function toggleComplete(id, currentStatus) {
             await fetch(`${BASE_URL}/todos/${id}`, {
                 method: 'PUT',
@@ -210,7 +256,6 @@
             fetchTodos();
         }
 
-        // Delete Task (DELETE)
         async function deleteTodo(id) {
             await fetch(`${BASE_URL}/todos/${id}`, {
                 method: 'DELETE',
@@ -219,7 +264,6 @@
             fetchTodos();
         }
 
-        // Check screen dynamic state (Hide/Show sections)
         function checkScreenState() {
             if (token) {
                 document.getElementById('authBox').classList.add('hidden');
@@ -232,7 +276,6 @@
             }
         }
 
-        // Logout function
         function logout() {
             token = '';
             loggedInUser = '';
@@ -240,7 +283,6 @@
             checkScreenState();
         }
 
-        // Page start control
         checkScreenState();
     </script>
 </body>
