@@ -59,6 +59,17 @@ const protect = async (req, res, next) => {
         res.status(401).json({ message: "Koi Token nahi mila, Authorization blocked!" });
     }
 };
+// 3.5 Profile ka Schema (User ki extra details ke liye)
+const profileSchema = new mongoose.Schema({
+    // Yeh line Profile ko User ke saath link karegi (Foreign Key ki tarah)
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    bio: { type: String, default: "Hey there! I am using Secure Todo App." },
+    city: { type: String, default: "Not Specified" },
+    phoneNumber: String
+});
+
+const Profile = mongoose.model('Profile', profileSchema);
+
 
 
 
@@ -114,28 +125,69 @@ app.delete('/api/todos/:id', async (req, res) => {
         res.status(500).json({ message: error.message });
     }
 });
-// 1. SIGNUP: Naya account banane ke liye
-app.post('/api/auth/signup', async (req, res) => {
+// GET PROFILE: Logged-in user ki profile aur user data jodh kar dekhna
+app.get('/api/profile', protect, async (req, res) => {
     try {
-        const { username, password } = req.body;
+        // .populate('user') karne se user ka data link ho jayega
+        // '-password' likhne se security ke liye password response mein nahi aayega
+        const userProfile = await Profile.findOne({ user: req.user }).populate('user', '-password');
 
-        // Check karein ki user pehle se toh nahi hai
-        const userExists = await User.findOne({ username });
-        if (userExists) return res.status(400).json({ message: "Username pehle se liya ja chuka hai!" });
+        if (!userProfile) return res.status(404).json({ message: "Profile nahi mili!" });
 
-        // Password ko encrypt (hash) karein taaki database admin bhi na padh sake
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(password, salt);
-
-        // Naya user save karein
-        const newUser = new User({ username, password: hashedPassword });
-        await newUser.save();
-
-        res.status(201).json({ message: "Signup safal raha! Ab aap login kar sakte hain. 🎉" });
+        res.status(200).json(userProfile);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 });
+// PUT PROFILE: Logged-in user ki profile details update karne ke liye
+app.put('/api/profile', protect, async (req, res) => {
+    try {
+        const { bio, city, phoneNumber } = req.body;
+
+        // User ki ID ke basis par uski profile dhoodhein aur update karein
+        const updatedProfile = await Profile.findOneAndUpdate(
+            { user: req.user },
+            { bio, city, phoneNumber },
+            { new: true } // Taaki response mein naya/updated data dikhe
+        ).populate('user', '-password'); // Saath mein user data bhi link rakhein
+
+        if (!updatedProfile) {
+            return res.status(404).json({ message: "Profile nahi mili!" });
+        }
+
+        res.status(200).json(updatedProfile);
+    } catch (error) {
+        res.status(400).json({ message: error.message });
+    }
+});
+
+// SIGNUP: Updated version with Profile creation
+app.post('/api/auth/signup', async (req, res) => {
+    try {
+        const { username, password } = req.body;
+
+        const userExists = await User.findOne({ username });
+        if (userExists) return res.status(400).json({ message: "Username pehle se liya ja chuka hai!" });
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        // 1. User save karein
+        const newUser = new User({ username, password: hashedPassword });
+        const savedUser = await newUser.save();
+
+        // 2. Naye User ke liye automatic Profile banayein aur link karein
+        const newProfile = new Profile({
+            user: savedUser._id // User ki unique ID yahan store hogi
+        });
+        await newProfile.save();
+
+        res.status(201).json({ message: "Signup safal raha aur Profile bhi ban gayi! 🎉" });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
 // 2. LOGIN: Account verify karke token dena
 app.post('/api/auth/login', async (req, res) => {
     try {
