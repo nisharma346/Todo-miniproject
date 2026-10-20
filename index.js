@@ -17,11 +17,18 @@ mongoose.connect('mongodb://localhost:27017/todoDB')
 
 // 2. Todo ka Schema (Blueprint) banayein
 const todoSchema = new mongoose.Schema({
-    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, // User ki ID store karega
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     task: { type: String, required: true },
     isCompleted: { type: Boolean, default: false },
+    // Nayi field: Jo sirf user ke diye gaye options hi accept karegi
+    category: {
+        type: String,
+        enum: ['Personal', 'Work', 'Shopping', 'Others'],
+        default: 'Personal'
+    },
     createdAt: { type: Date, default: Date.now }
 });
+
 
 
 // 3. Schema se Model banayein
@@ -77,11 +84,13 @@ const Profile = mongoose.model('Profile', profileSchema);
 
 
 /// A. POST: Naya Task daalna (Sirf logged-in user ke liye)
+// POST: Naya Task Category ke saath daalna
 app.post('/api/todos', protect, async (req, res) => {
     try {
         const newTodo = new Todo({
-            user: req.user, // Middleware se mili user ID
-            task: req.body.task
+            user: req.user,
+            task: req.body.task,
+            category: req.body.category // Frontend se category accept karein
         });
         const savedTodo = await newTodo.save();
         res.status(201).json(savedTodo);
@@ -90,16 +99,26 @@ app.post('/api/todos', protect, async (req, res) => {
     }
 });
 
+
 // B. GET: Sirf usi User ke Tasks dikhana
+// GET: Logged-in user ke todos dekhna (Category filter ke sath)
 app.get('/api/todos', protect, async (req, res) => {
     try {
-        // user: req.user se sirf us bande ke todos milenge jisne login kiya hai
-        const allTodos = await Todo.find({ user: req.user });
+        // Ek khali object banayein query ke liye
+        let query = { user: req.user };
+
+        // Agar URL mein query aayi hai (jaise: ?category=Work) toh use jodein
+        if (req.query.category) {
+            query.category = req.query.category;
+        }
+
+        const allTodos = await Todo.find(query);
         res.status(200).json(allTodos);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 });
+
 
 
 // C. PUT: Task ko complete mark karna ya badalna (ID ke zariye)
@@ -125,6 +144,31 @@ app.delete('/api/todos/:id', async (req, res) => {
         res.status(500).json({ message: error.message });
     }
 });
+// GET STATS: User ke todos ka poora report/statistics nikalna
+app.get('/api/todos/stats', protect, async (req, res) => {
+    try {
+        const stats = await Todo.aggregate([
+            // Stage 1: Sirf usi logged-in user ke todos ko filter karein
+            { $match: { user: new mongoose.Types.ObjectId(req.user) } },
+
+            // Stage 2: Data ko category ke hisab se group karein aur count nikalyein
+            {
+                $group: {
+                    _id: "$category", // Category ke aadhar par group banayein
+                    totalTasks: { $sum: 1 }, // Har task ke liye +1 karein
+                    completedTasks: {
+                        $sum: { $cond: [{ $eq: ["$isCompleted", true] }, 1, 0] } // Agar completed true hai toh hi +1 karein
+                    }
+                }
+            }
+        ]);
+
+        res.status(200).json(stats);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
 // GET PROFILE: Logged-in user ki profile aur user data jodh kar dekhna
 app.get('/api/profile', protect, async (req, res) => {
     try {
