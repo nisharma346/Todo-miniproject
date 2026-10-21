@@ -85,7 +85,7 @@ const Profile = mongoose.model('Profile', profileSchema);
 
 /// A. POST: Naya Task daalna (Sirf logged-in user ke liye)
 // POST: Naya Task Category ke saath daalna
-app.post('/api/todos', protect, async (req, res) => {
+app.post('/api/todos', async (req, res) => {
     try {
         const newTodo = new Todo({
             user: req.user,
@@ -102,7 +102,7 @@ app.post('/api/todos', protect, async (req, res) => {
 
 // B. GET: Sirf usi User ke Tasks dikhana
 // GET: Logged-in user ke todos dekhna (Category filter ke sath)
-app.get('/api/todos', protect, async (req, res) => {
+app.get('/api/todos', async (req, res) => {
     try {
         // Ek khali object banayein query ke liye
         let query = { user: req.user };
@@ -145,7 +145,7 @@ app.delete('/api/todos/:id', async (req, res) => {
     }
 });
 // GET STATS: User ke todos ka poora report/statistics nikalna
-app.get('/api/todos/stats', protect, async (req, res) => {
+app.get('/api/todos/stats', async (req, res) => {
     try {
         const stats = await Todo.aggregate([
             // Stage 1: Sirf usi logged-in user ke todos ko filter karein
@@ -170,7 +170,7 @@ app.get('/api/todos/stats', protect, async (req, res) => {
 });
 
 // GET PROFILE: Logged-in user ki profile aur user data jodh kar dekhna
-app.get('/api/profile', protect, async (req, res) => {
+app.get('/api/profile', async (req, res) => {
     try {
         // .populate('user') karne se user ka data link ho jayega
         // '-password' likhne se security ke liye password response mein nahi aayega
@@ -184,7 +184,7 @@ app.get('/api/profile', protect, async (req, res) => {
     }
 });
 // PUT PROFILE: Logged-in user ki profile details update karne ke liye
-app.put('/api/profile', protect, async (req, res) => {
+app.put('/api/profile', async (req, res) => {
     try {
         const { bio, city, phoneNumber } = req.body;
 
