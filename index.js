@@ -1,7 +1,12 @@
+require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || Buffer.byteLength(JWT_SECRET, 'utf8') < 32) {
+    throw new Error('JWT_SECRET must be configured with a random value of at least 32 bytes.');
+}
 
 
 const app = express();
@@ -26,6 +31,12 @@ const todoSchema = new mongoose.Schema({
         enum: ['Personal', 'Work', 'Shopping', 'Others'],
         default: 'Personal'
     },
+    priority: {
+        type: String,
+        enum: ['High', 'Medium', 'Low'],
+        default: 'Medium'
+    },
+    dueDate: { type: Date },          // Optional due date
     createdAt: { type: Date, default: Date.now }
 });
 
@@ -45,25 +56,33 @@ const protect = async (req, res, next) => {
     let token;
 
     // Check karein ki headers mein token aaya hai ya nahi
-    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
         try {
             // "Bearer <token>" mein se sirf token alag karein
-            token = req.headers.authorization.split(' ')[1];
+            const tokenParts = req.headers.authorization.split(' ');
+            token = tokenParts[1];
+            if (!token || tokenParts.length !== 2) {
+                return res.status(401).json({ message: "Koi Token nahi mila, Authorization blocked!" });
+            }
 
             // Token ko verify karein (Wahi SECRET_KEY use karein jo login mein dali thi)
-            const decoded = jwt.verify(token, 'SECRET_KEY');
+            const decoded = jwt.verify(token, JWT_SECRET);
+            if (!decoded || typeof decoded !== 'object' || !decoded.userId) {
+                return res.status(401).json({ message: "Asafal Token, Permission nahi hai!" });
+            }
 
             // Logged-in user ki ID request object mein jodh dein
-            req.user = decoded.userId;
+            // decoded.userId is a Mongoose ObjectId; convert to string for consistent comparisons
+            req.user = decoded.userId.toString();
 
-            next(); // Agle step (Route) par jaane ki permission dein
+            return next(); // Agle step (Route) par jaane ki permission dein
         } catch (error) {
-            res.status(401).json({ message: "Asafal Token, Permission nahi hai!" });
+            return res.status(401).json({ message: "Asafal Token, Permission nahi hai!" });
         }
     }
 
     if (!token) {
-        res.status(401).json({ message: "Koi Token nahi mila, Authorization blocked!" });
+        return res.status(401).json({ message: "Koi Token nahi mila, Authorization blocked!" });
     }
 };
 // 3.5 Profile ka Schema (User ki extra details ke liye)
@@ -85,12 +104,14 @@ const Profile = mongoose.model('Profile', profileSchema);
 
 /// A. POST: Naya Task daalna (Sirf logged-in user ke liye)
 // POST: Naya Task Category ke saath daalna
-app.post('/api/todos', async (req, res) => {
+app.post('/api/todos', protect, async (req, res) => {
     try {
         const newTodo = new Todo({
             user: req.user,
             task: req.body.task,
-            category: req.body.category // Frontend se category accept karein
+            category: req.body.category,
+            priority: req.body.priority,
+            dueDate: req.body.dueDate || undefined   // Save only if provided
         });
         const savedTodo = await newTodo.save();
         res.status(201).json(savedTodo);
@@ -102,7 +123,7 @@ app.post('/api/todos', async (req, res) => {
 
 // B. GET: Sirf usi User ke Tasks dikhana
 // GET: Logged-in user ke todos dekhna (Category filter ke sath)
-app.get('/api/todos', async (req, res) => {
+app.get('/api/todos', protect, async (req, res) => {
     try {
         // Ek khali object banayein query ke liye
         let query = { user: req.user };
@@ -122,13 +143,25 @@ app.get('/api/todos', async (req, res) => {
 
 
 // C. PUT: Task ko complete mark karna ya badalna (ID ke zariye)
-app.put('/api/todos/:id', async (req, res) => {
+app.put('/api/todos/:id', protect, async (req, res) => {
     try {
-        const updatedTodo = await Todo.findByIdAndUpdate(
-            req.params.id,
-            req.body,
-            { new: true }
+        const { task, category, priority, isCompleted, dueDate } = req.body;
+        const updates = {};
+        if (task !== undefined) updates.task = task;
+        if (category !== undefined) updates.category = category;
+        if (priority !== undefined) updates.priority = priority;
+        if (isCompleted !== undefined) updates.isCompleted = isCompleted;
+        // dueDate: accept empty string / null to clear it, or a valid date string
+        if (dueDate !== undefined) updates.dueDate = dueDate ? new Date(dueDate) : null;
+
+        const updatedTodo = await Todo.findOneAndUpdate(
+            { _id: req.params.id, user: req.user },
+            updates,
+            { new: true, runValidators: true }
         );
+        if (!updatedTodo) {
+            return res.status(404).json({ message: 'Todo not found.' });
+        }
         res.status(200).json(updatedTodo);
     } catch (error) {
         res.status(400).json({ message: error.message });
@@ -136,16 +169,22 @@ app.put('/api/todos/:id', async (req, res) => {
 });
 
 // D. DELETE: Kisi task ko hatana (ID ke zariye)
-app.delete('/api/todos/:id', async (req, res) => {
+app.delete('/api/todos/:id', protect, async (req, res) => {
     try {
-        await Todo.findByIdAndDelete(req.params.id);
+        const deletedTodo = await Todo.findOneAndDelete({
+            _id: req.params.id,
+            user: req.user
+        });
+        if (!deletedTodo) {
+            return res.status(404).json({ message: 'Todo not found.' });
+        }
         res.status(200).json({ message: "Task delete ho gaya! 🗑️" });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 });
 // GET STATS: User ke todos ka poora report/statistics nikalna
-app.get('/api/todos/stats', async (req, res) => {
+app.get('/api/todos/stats', protect, async (req, res) => {
     try {
         const stats = await Todo.aggregate([
             // Stage 1: Sirf usi logged-in user ke todos ko filter karein
@@ -170,7 +209,7 @@ app.get('/api/todos/stats', async (req, res) => {
 });
 
 // GET PROFILE: Logged-in user ki profile aur user data jodh kar dekhna
-app.get('/api/profile', async (req, res) => {
+app.get('/api/profile', protect, async (req, res) => {
     try {
         // .populate('user') karne se user ka data link ho jayega
         // '-password' likhne se security ke liye password response mein nahi aayega
@@ -184,7 +223,7 @@ app.get('/api/profile', async (req, res) => {
     }
 });
 // PUT PROFILE: Logged-in user ki profile details update karne ke liye
-app.put('/api/profile', async (req, res) => {
+app.put('/api/profile', protect, async (req, res) => {
     try {
         const { bio, city, phoneNumber } = req.body;
 
@@ -247,9 +286,53 @@ app.post('/api/auth/login', async (req, res) => {
 
         // JWT Token banayein (Yeh token user ki pehchan ban jayega)
         // 'SECRET_KEY' ki jagah aap kuch bhi secure text likh sakte hain
-        const token = jwt.sign({ userId: user._id }, 'SECRET_KEY', { expiresIn: '1h' });
+        const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '1h' });
 
         res.status(200).json({ message: "Login safal raha! 👋", token });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// GET ME: Logged-in user ka basic account info (password nahi)
+app.get('/api/auth/me', protect, async (req, res) => {
+    try {
+        const user = await User.findById(req.user).select('-password');
+        if (!user) return res.status(404).json({ message: 'User nahi mila!' });
+        res.status(200).json({ username: user.username });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// PUT CHANGE-PASSWORD: Current password verify karke naya password set karna
+app.put('/api/auth/change-password', protect, async (req, res) => {
+    try {
+        const { currentPassword, newPassword } = req.body;
+
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({ message: 'Current aur new password dono zaroori hain.' });
+        }
+        if (newPassword.length < 6) {
+            return res.status(400).json({ message: 'Naya password kam se kam 6 characters ka hona chahiye.' });
+        }
+
+        // User ko database se dhoodhein (ID token se aati hai, frontend se nahi)
+        const user = await User.findById(req.user);
+        if (!user) return res.status(404).json({ message: 'User nahi mila!' });
+
+        // Current password verify karein bcrypt se
+        const isMatch = await bcrypt.compare(currentPassword, user.password);
+        if (!isMatch) {
+            return res.status(400).json({ message: 'Current password galat hai!' });
+        }
+
+        // Naya password hash karein aur save karein
+        const salt = await bcrypt.genSalt(10);
+        user.password = await bcrypt.hash(newPassword, salt);
+        await user.save();
+
+        res.status(200).json({ message: 'Password successfully change ho gaya! 🔒 Please dobara login karein.' });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
