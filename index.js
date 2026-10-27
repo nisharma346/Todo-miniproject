@@ -3,6 +3,20 @@ const express = require('express');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const {
+    RECURRENCE_OPTIONS,
+    validateRecurrence,
+    calculateNextDueDate,
+    ensureNextOccurrence
+} = require('./recurrence');
+const {
+    buildCompletionHistoryPipeline,
+    buildCompletionTransitionFilter,
+    buildProductivitySummary,
+    getLocalDateKey,
+    validateDailyGoal,
+    validateTimeZone
+} = require('./productivity');
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET || Buffer.byteLength(JWT_SECRET, 'utf8') < 32) {
     throw new Error('JWT_SECRET must be configured with a random value of at least 32 bytes.');
@@ -24,7 +38,28 @@ mongoose.connect('mongodb://localhost:27017/todoDB')
 const todoSchema = new mongoose.Schema({
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     task: { type: String, required: true },
+    description: { type: String, default: '' },
     isCompleted: { type: Boolean, default: false },
+    status: {
+        type: String,
+        enum: ['todo', 'inProgress', 'completed'],
+        default: function () {
+            return this.isCompleted ? 'completed' : 'todo';
+        }
+    },
+    recurrence: {
+        type: String,
+        enum: RECURRENCE_OPTIONS,
+        default: 'none'
+    },
+    completedAt: { type: Date, default: null },
+    completionHistory: {
+        type: [{ _id: false, completedAt: { type: Date, required: true } }],
+        default: []
+    },
+    nextOccurrenceId: { type: mongoose.Schema.Types.ObjectId },
+    nextOccurrenceCreatedAt: { type: Date },
+    nextOccurrenceDueDate: { type: Date },
     // Nayi field: Jo sirf user ke diye gaye options hi accept karegi
     category: {
         type: String,
@@ -47,7 +82,8 @@ const Todo = mongoose.model('Todo', todoSchema);
 // User ka Structure (Schema)
 const userSchema = new mongoose.Schema({
     username: { type: String, required: true, unique: true },
-    password: { type: String, required: true }
+    password: { type: String, required: true },
+    dailyTaskGoal: { type: Number, min: 1, max: 100, default: 5 }
 });
 
 const User = mongoose.model('User', userSchema);
@@ -106,17 +142,27 @@ const Profile = mongoose.model('Profile', profileSchema);
 // POST: Naya Task Category ke saath daalna
 app.post('/api/todos', protect, async (req, res) => {
     try {
+        const recurrence = req.body.recurrence === undefined
+            ? 'none'
+            : validateRecurrence(req.body.recurrence);
         const newTodo = new Todo({
             user: req.user,
             task: req.body.task,
+            description: req.body.description,
             category: req.body.category,
             priority: req.body.priority,
-            dueDate: req.body.dueDate || undefined   // Save only if provided
+            dueDate: req.body.dueDate || undefined,
+            recurrence
         });
         const savedTodo = await newTodo.save();
         res.status(201).json(savedTodo);
     } catch (error) {
-        res.status(400).json({ message: error.message });
+        const isClientError =
+            error instanceof TypeError ||
+            error instanceof RangeError ||
+            error instanceof mongoose.Error.ValidationError ||
+            error instanceof mongoose.Error.CastError;
+        res.status(isClientError ? 400 : 500).json({ message: error.message });
     }
 });
 
@@ -145,18 +191,141 @@ app.get('/api/todos', protect, async (req, res) => {
 // C. PUT: Task ko complete mark karna ya badalna (ID ke zariye)
 app.put('/api/todos/:id', protect, async (req, res) => {
     try {
-        const { task, category, priority, isCompleted, dueDate } = req.body;
+        const { task, description, category, priority, isCompleted, status, dueDate } = req.body;
         const updates = {};
         if (task !== undefined) updates.task = task;
+        if (description !== undefined) updates.description = description;
         if (category !== undefined) updates.category = category;
         if (priority !== undefined) updates.priority = priority;
-        if (isCompleted !== undefined) updates.isCompleted = isCompleted;
-        // dueDate: accept empty string / null to clear it, or a valid date string
+        if (req.body.recurrence !== undefined) {
+            updates.recurrence = validateRecurrence(req.body.recurrence);
+        }
+        if (status !== undefined && !['todo', 'inProgress', 'completed'].includes(status)) {
+            return res.status(400).json({ message: 'Invalid task status.' });
+        }
+        if (isCompleted !== undefined && typeof isCompleted !== 'boolean') {
+            return res.status(400).json({ message: 'isCompleted must be a boolean.' });
+        }
+        if (status !== undefined && isCompleted !== undefined &&
+            (status === 'completed') !== isCompleted) {
+            return res.status(400).json({ message: 'Task status and completion state must match.' });
+        }
+        if (status !== undefined) {
+            updates.status = status;
+            updates.isCompleted = status === 'completed';
+        } else if (isCompleted !== undefined) {
+            updates.isCompleted = isCompleted;
+            updates.status = isCompleted ? 'completed' : 'todo';
+        }
         if (dueDate !== undefined) updates.dueDate = dueDate ? new Date(dueDate) : null;
+
+        if (updates.isCompleted === true) {
+            const existingTodo = await Todo.findOne({
+                _id: req.params.id,
+                user: req.user
+            });
+            if (!existingTodo) {
+                return res.status(404).json({ message: 'Todo not found.' });
+            }
+
+            const wasCompleted = existingTodo.isCompleted || existingTodo.status === 'completed';
+            let completedTodo = existingTodo;
+            let completedByThisRequest = false;
+            if (!wasCompleted) {
+                const completionTime = new Date();
+                const recurrence = updates.recurrence || existingTodo.recurrence || 'none';
+                const nextOccurrenceId = existingTodo.nextOccurrenceId ||
+                    (recurrence !== 'none' ? new mongoose.Types.ObjectId() : undefined);
+                const nextOccurrenceCreatedAt = existingTodo.nextOccurrenceCreatedAt ||
+                    (nextOccurrenceId ? completionTime : undefined);
+                const nextDueDate = nextOccurrenceId
+                    ? existingTodo.nextOccurrenceDueDate || calculateNextDueDate(
+                        recurrence,
+                        updates.dueDate !== undefined ? updates.dueDate : existingTodo.dueDate,
+                        completionTime
+                    )
+                    : undefined;
+                const setValues = {
+                    ...updates,
+                    isCompleted: true,
+                    status: 'completed',
+                    completedAt: completionTime
+                };
+                if (nextOccurrenceId) {
+                    setValues.nextOccurrenceId = nextOccurrenceId;
+                    setValues.nextOccurrenceCreatedAt = nextOccurrenceCreatedAt;
+                    setValues.nextOccurrenceDueDate = nextDueDate;
+                }
+
+                completedTodo = await Todo.findOneAndUpdate(
+                    buildCompletionTransitionFilter(req.params.id, req.user),
+                    {
+                        $set: setValues,
+                        $push: { completionHistory: { completedAt: completionTime } }
+                    },
+                    { new: true, runValidators: true }
+                );
+                completedByThisRequest = Boolean(completedTodo);
+                if (!completedTodo) {
+                    completedTodo = await Todo.findOne({
+                        _id: req.params.id,
+                        user: req.user
+                    });
+                    if (!completedTodo) {
+                        return res.status(404).json({ message: 'Todo not found.' });
+                    }
+                }
+            }
+
+            if (completedTodo.nextOccurrenceId) {
+                try {
+                    await ensureNextOccurrence(Todo, {
+                        ...completedTodo.toObject(),
+                        recurrence: completedTodo.recurrence || 'none'
+                    });
+                } catch (occurrenceError) {
+                    if (completedByThisRequest) {
+                        try {
+                            await Todo.findOneAndUpdate(
+                                {
+                                    _id: req.params.id,
+                                    user: req.user,
+                                    nextOccurrenceId: completedTodo.nextOccurrenceId,
+                                    status: 'completed'
+                                },
+                                {
+                                    $set: {
+                                        isCompleted: false,
+                                        status: existingTodo.status || 'todo'
+                                    },
+                                    $unset: { completedAt: 1 },
+                                    $pull: {
+                                        completionHistory: {
+                                            completedAt: completedTodo.completedAt
+                                        }
+                                    }
+                                },
+                                { new: true, runValidators: true }
+                            );
+                        } catch (rollbackError) {
+                            throw new Error(
+                                `Could not create the next occurrence: ${occurrenceError.message}. ` +
+                                `Could not restore the task status: ${rollbackError.message}`
+                            );
+                        }
+                    }
+                    throw occurrenceError;
+                }
+            }
+            return res.status(200).json(completedTodo);
+        }
 
         const updatedTodo = await Todo.findOneAndUpdate(
             { _id: req.params.id, user: req.user },
-            updates,
+            {
+                $set: updates,
+                ...(updates.isCompleted === false ? { $unset: { completedAt: 1 } } : {})
+            },
             { new: true, runValidators: true }
         );
         if (!updatedTodo) {
@@ -164,7 +333,12 @@ app.put('/api/todos/:id', protect, async (req, res) => {
         }
         res.status(200).json(updatedTodo);
     } catch (error) {
-        res.status(400).json({ message: error.message });
+        const isClientError =
+            error instanceof TypeError ||
+            error instanceof RangeError ||
+            error instanceof mongoose.Error.ValidationError ||
+            error instanceof mongoose.Error.CastError;
+        res.status(isClientError ? 400 : 500).json({ message: error.message });
     }
 });
 
@@ -205,6 +379,54 @@ app.get('/api/todos/stats', protect, async (req, res) => {
         res.status(200).json(stats);
     } catch (error) {
         res.status(500).json({ message: error.message });
+    }
+});
+
+app.get('/api/productivity', protect, async (req, res) => {
+    try {
+        const timeZone = validateTimeZone(req.query.timeZone || 'UTC');
+        const userId = new mongoose.Types.ObjectId(req.user);
+        const [user, dailyRows] = await Promise.all([
+            User.findById(userId).select('dailyTaskGoal').lean(),
+            Todo.aggregate(buildCompletionHistoryPipeline(userId, timeZone))
+        ]);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
+
+        const dailyCounts = new Map(dailyRows.map(({ _id, count }) => [_id, count]));
+        const today = getLocalDateKey(new Date(), timeZone);
+        const summary = buildProductivitySummary({
+            dailyCounts,
+            today,
+            dailyGoal: user.dailyTaskGoal ?? 5
+        });
+        return res.status(200).json(summary);
+    } catch (error) {
+        const isClientError = error instanceof TypeError || error instanceof RangeError;
+        return res.status(isClientError ? 400 : 500).json({ message: error.message });
+    }
+});
+
+app.put('/api/productivity/goal', protect, async (req, res) => {
+    try {
+        const dailyTaskGoal = validateDailyGoal(req.body.dailyGoal);
+        const user = await User.findByIdAndUpdate(
+            req.user,
+            { $set: { dailyTaskGoal } },
+            { new: true, runValidators: true }
+        ).select('dailyTaskGoal');
+        if (!user) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
+        return res.status(200).json({ dailyGoal: user.dailyTaskGoal });
+    } catch (error) {
+        const isClientError =
+            error instanceof TypeError ||
+            error instanceof RangeError ||
+            error instanceof mongoose.Error.ValidationError ||
+            error instanceof mongoose.Error.CastError;
+        return res.status(isClientError ? 400 : 500).json({ message: error.message });
     }
 });
 
