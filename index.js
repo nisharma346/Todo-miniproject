@@ -560,7 +560,12 @@ app.put('/api/auth/change-password', protect, async (req, res) => {
     }
 });
 
-// Server Start Karein
-app.listen(3000, () => {
-    console.log("Todo Server port 3000 par ready hai...");
-});
+// Local development ke liye server start karein
+if (require.main === module) {
+    app.listen(3000, () => {
+        console.log("Todo Server port 3000 par ready hai...");
+    });
+}
+
+// Vercel ke liye Express app export karein
+module.exports = app;
