@@ -29,8 +29,15 @@ const cors = require('cors');
 app.use(cors()); // Is line ko app.use(express.json()) ke theek upar ya niche likh dein
 
 
-// 1. MongoDB se Connect Karein (Database ka naam 'todoDB' rakha hai)
-mongoose.connect('mongodb://localhost:27017/todoDB')
+// 1. MongoDB se Connect Karein
+const MONGO_URI = process.env.MONGO_URI;
+if (!MONGO_URI) {
+    throw new Error('MONGO_URI environment variable is not set.');
+}
+mongoose.connect(MONGO_URI, {
+    serverSelectionTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+})
     .then(() => console.log("Todo Database se connection safal raha! 🚀"))
     .catch((err) => console.error("Database Connection Fail:", err));
 
