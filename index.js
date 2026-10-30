@@ -3,6 +3,48 @@ const express = require('express');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+
+// Vercel serverless ke liye connection caching
+// NOTE: bufferCommands global set NAHI karein — connectDB ke andar
+// hum khud connection ka wait karte hain
+
+let cachedConnection = null;
+
+async function connectDB() {
+    // Agar pehle se live connection hai toh wahi use karo
+    if (cachedConnection && mongoose.connection.readyState === 1) {
+        return cachedConnection;
+    }
+
+    // Agar mongoose already connecting hai toh wait karo
+    if (mongoose.connection.readyState === 2) {
+        await new Promise((resolve, reject) => {
+            mongoose.connection.once('connected', resolve);
+            mongoose.connection.once('error', reject);
+        });
+        cachedConnection = mongoose.connection;
+        return cachedConnection;
+    }
+
+    // Pehli baar ya reconnect karna ho toh
+    try {
+        const conn = await mongoose.connect(process.env.MONGO_URI, {
+            serverSelectionTimeoutMS: 15000,
+            socketTimeoutMS: 45000,
+            connectTimeoutMS: 15000,
+            maxPoolSize: 5,
+            minPoolSize: 0,
+            bufferCommands: true, // mongoose ko queries buffer karne do jab tak connect ho
+        });
+        cachedConnection = conn;
+        console.log("MongoDB se connection safal raha! 🚀");
+        return cachedConnection;
+    } catch (err) {
+        cachedConnection = null;
+        console.error("Database Connection Fail:", err.message);
+        throw new Error(`Database se connect nahi ho saka: ${err.message}`);
+    }
+}
 const {
     RECURRENCE_OPTIONS,
     validateRecurrence,
@@ -28,18 +70,20 @@ app.use(express.json()); // Server ko JSON data samajhne ke liye
 const cors = require('cors');
 app.use(cors()); // Is line ko app.use(express.json()) ke theek upar ya niche likh dein
 
+// Har request se pehle DB connect karo (serverless ke liye connection caching)
+app.use(async (req, res, next) => {
+    try {
+        await connectDB();
+        next();
+    } catch (err) {
+        console.error('DB middleware error:', err.message);
+        return res.status(503).json({
+            message: 'Database se connect nahi ho saka. Please thodi der baad try karein.',
+            detail: process.env.NODE_ENV !== 'production' ? err.message : undefined
+        });
+    }
+});
 
-// 1. MongoDB se Connect Karein
-const MONGO_URI = process.env.MONGO_URI;
-if (!MONGO_URI) {
-    throw new Error('MONGO_URI environment variable is not set.');
-}
-mongoose.connect(MONGO_URI, {
-    serverSelectionTimeoutMS: 10000,
-    socketTimeoutMS: 45000,
-})
-    .then(() => console.log("Todo Database se connection safal raha! 🚀"))
-    .catch((err) => console.error("Database Connection Fail:", err));
 
 // 2. Todo ka Schema (Blueprint) banayein
 const todoSchema = new mongoose.Schema({
@@ -569,8 +613,13 @@ app.put('/api/auth/change-password', protect, async (req, res) => {
 
 // Local development ke liye server start karein
 if (require.main === module) {
-    app.listen(3000, () => {
-        console.log("Todo Server port 3000 par ready hai...");
+    connectDB().then(() => {
+        app.listen(3000, () => {
+            console.log("Todo Server port 3000 par ready hai...");
+        });
+    }).catch(err => {
+        console.error("Server start nahi hua:", err);
+        process.exit(1);
     });
 }
 
